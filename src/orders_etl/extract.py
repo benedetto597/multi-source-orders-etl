@@ -61,6 +61,13 @@ class SqlSourceExtractor:
         query = f"SELECT * FROM {table}"
         params: dict[str, object] = {}
         if since is not None:
+            # NOTE (real SQL Server): when one table stores dates as varchar and the other as
+            # datetime2 (as dc_1 vs dc_2 do here), COALESCE(updated_at, created_at) mixes types
+            # and SQL Server raises a conversion error on any non-date text such as 'N/A'.
+            # For that source use a per-table filter with TRY_CONVERT, e.g.
+            #   WHERE COALESCE(TRY_CONVERT(datetime2, updated_at),
+            #                  TRY_CONVERT(datetime2, created_at)) >= :since
+            # SQLite compares the ISO text directly, so the portable form below is enough here.
             query += " WHERE COALESCE(updated_at, created_at) >= :since"
             # SQLite stores these timestamps as ISO text; other engines bind a real datetime.
             sqlite = self.engine.dialect.name == "sqlite"
