@@ -21,12 +21,14 @@ flowchart LR
     X --> N[normalize_schema]
     Y --> N
     N --> M[add_load_metadata]
-    M --> D[remove_duplicates<br/>latest wins]
+    M --> QS[split_invalid]
+    QS -->|no id / unknown center| QT[(quarantined_purchase_orders)]
+    QS --> D[remove_duplicates<br/>latest wins]
     D -->|ETL_MODE=full| F[replace_all<br/>DELETE + INSERT, one transaction]
     D -->|ETL_MODE=incremental| U[upsert<br/>ON CONFLICT ... WHERE newer]
     F --> T[(SQLite<br/>consolidated_purchase_orders)]
     U --> T
-    T --> V[DataValidator<br/>8 checks]
+    T --> V[DataValidator<br/>9 checks]
     U -.-> W[(watermark<br/>etl_state.json)]
     F -.-> W
 ```
@@ -37,6 +39,7 @@ flowchart LR
 | `schema.py` | Table names, target columns, DDL and indexes (single source of truth) |
 | `extract.py` | SQL extraction through any SQLAlchemy URL; CSV extraction by distribution-center folder |
 | `transform.py` | Casts every source to the target types; bad values become NULL, the row is kept |
+| `quarantine.py` | Sets aside rows with no `id` or an unattributable center, with a reason |
 | `dedup.py` | One row per key, the most recent one |
 | `load.py` | Atomic full refresh, latest-wins upsert, load summary |
 | `validate.py` | Post-load data-quality checks and report |
@@ -63,6 +66,10 @@ flowchart LR
 | `modified_at` | TIMESTAMP | last time the row changed |
 
 Indexes: `distribution_center`, `created_at`, `updated_at`, `status`, `order_code`.
+
+## Quarantine
+
+A row whose business key is unusable (no `id`, or a CSV order code that cannot be attributed to a distribution center) cannot be deduplicated or loaded. Instead of failing the whole run, `split_invalid` moves it to `quarantined_purchase_orders`, which has the same columns as the target plus `quarantine_reason`. A full refresh replaces the quarantine table; incremental runs append to it. The validation report shows the count by reason, so someone can review and fix the source.
 
 ## Deduplication
 
@@ -100,6 +107,7 @@ The overlap window re-reads a margin before the watermark to catch late-arriving
 | 6 | Only known statuses | WARN |
 | 7 | `created_at` within the expected range | WARN |
 | 8 | No negative quantities/totals; flag over-deliveries | FAIL / WARN |
+| 9 | Rows set aside in `quarantined_purchase_orders` (counted by reason) | WARN |
 
 ## Scaling path
 

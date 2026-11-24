@@ -22,20 +22,22 @@ flowchart LR
     B[/Monthly CSVs/] --> E
     E --> N[Normalize types]
     N --> D[Deduplicate<br/>latest wins]
+    N --> Q[(Quarantine<br/>rows without a key)]
     D -->|full| F[Atomic replace]
     D -->|incremental| U[Upsert, never<br/>overwrite newer rows]
     F --> T[(SQLite<br/>consolidated_purchase_orders)]
     U --> T
-    T --> V[8 data-quality checks]
+    T --> V[9 data-quality checks]
 ```
 
 | Step | What happens |
 |---|---|
 | **Extract** | Any SQLAlchemy URL (SQLite for the demo, SQL Server via `pyodbc` in real use) plus CSV folders per distribution center. Incremental runs read only rows changed since the last watermark. |
 | **Normalize** | `11944.0` → `"11944"`, `"110012913.0"` → `"110012913"`, text quantities → integers, mixed date formats → timestamps. Unparseable values become NULL, and the row is kept for validation. |
+| **Quarantine** | Rows with no `id`, or with a distribution center that cannot be attributed, cannot be keyed. They go to `quarantined_purchase_orders` with a reason instead of aborting the run. |
 | **Deduplicate** | Key `(id, distribution_center)`. Rows are ranked by `updated_at`, falling back to `created_at`. Undated rows lose, and on ties the later delivery wins. |
 | **Load** | Full refresh: `DELETE` + `INSERT` in **one transaction**, so a failed run never leaves the table half-empty. Incremental: `INSERT … ON CONFLICT DO UPDATE … WHERE newer`. |
-| **Validate** | Table exists, row count, duplicate keys, critical NULLs, known centers and statuses, date range, numeric consistency. Results are PASS / WARN / FAIL with a saved report. |
+| **Validate** | Table exists, row count, duplicate keys, critical NULLs, known centers and statuses, date range, numeric consistency, quarantined rows. Results are PASS / WARN / FAIL with a saved report. |
 
 More detail: [docs/architecture.md](docs/architecture.md) · How I'd scale it into a platform: [docs/design-notes.md](docs/design-notes.md)
 
@@ -58,9 +60,11 @@ flowchart LR
     S1 & S2 --> RAW["Raw union<br/>10,600 rows"]
     C1 & C2 --> RAW
     RAW --> NORM["Normalized<br/>10,600 rows<br/>typed, nothing dropped"]
-    NORM --> DEDUP["Deduplicated<br/>9,163 rows<br/>1,437 older versions removed"]
-    DEDUP --> TGT[("consolidated_purchase_orders<br/>dc_1 = 4,588 · dc_2 = 4,575")]
-    TGT --> REP["Validation report<br/>7 PASS · 1 WARN · 0 FAIL"]
+    NORM --> QUAR[("quarantined_purchase_orders<br/>15 rows without an id")]
+    NORM --> DEDUP["Deduplicated<br/>9,173 rows<br/>1,412 older versions removed"]
+    DEDUP --> TGT[("consolidated_purchase_orders<br/>dc_1 = 4,579 · dc_2 = 4,594")]
+    TGT --> REP["Validation report<br/>7 PASS · 2 WARN · 0 FAIL"]
+    QUAR --> REP
 ```
 
 ### Workflow: one CLI command at a time
@@ -80,11 +84,11 @@ sequenceDiagram
     CLI-->>U: reports/exploration_*.txt
     U->>CLI: run (ETL_MODE=full)
     CLI->>SRC: extract all rows
-    CLI->>CLI: normalize + deduplicate
+    CLI->>CLI: normalize, quarantine keyless rows, deduplicate
     CLI->>TGT: DELETE + INSERT (one transaction)
     CLI->>ST: save watermark
     U->>CLI: validate
-    CLI->>TGT: 8 data-quality checks
+    CLI->>TGT: 9 data-quality checks
     CLI-->>U: reports/validation_*.txt, exit code 0 or 1
 ```
 
@@ -131,6 +135,7 @@ Edge cases handled by the same rule:
 | no usable date at all | loses to any dated version |
 | identical timestamps | the later delivery (CSV) wins |
 | same `id` in `dc_1` and `dc_2` | two different orders, both kept |
+| no `id`, or a center that cannot be attributed | set aside in `quarantined_purchase_orders` with a reason; the run continues |
 | incremental run re-reads an older version | the upsert guard skips it (`skipped_stale`) |
 
 ## Key design decisions
@@ -138,7 +143,7 @@ Edge cases handled by the same rule:
 - **Business key = `(id, distribution_center)`**: the same `id` exists in both centers and refers to different orders.
 - **Latest wins, everywhere**: the same rule applies inside a batch (dedup) and against the target (upsert guard), so re-reading data is always safe.
 - **Full refresh by default**: simple and fully consistent at this volume. The incremental mode exists for frequent runs, re-reading an overlap window before the watermark to catch late updates.
-- **Keep bad rows, flag them**: type coercion never drops data silently. The validator reports what looks wrong.
+- **Keep bad rows, flag them**: type coercion never drops data silently, and rows that cannot be keyed are quarantined for review instead of failing the whole load. The validator reports both.
 - **Secrets only in the environment**: configuration comes from env vars or `.env`, and `.env.example` documents them.
 
 ## Quickstart
@@ -158,23 +163,25 @@ orders-etl all                     # run the ETL, then validate
 Sample output (default synthetic dataset, 3,000 SQL orders per center):
 
 ```text
-ETL finished (full) in 0.84s
+ETL finished (full) in 1.55s
   extracted rows        : 10,600
-  duplicates removed    : 1,437
-  rows in target        : 9,163
+  duplicates removed    : 1,412
+  rows in target        : 9,173
   duplicate keys        : 0
-  by distribution center: dc_1=4,588, dc_2=4,575
-  by source             : csv=4,438, sql_dc_1=2,370, sql_dc_2=2,355
+  quarantined rows      : 15 (see quarantined_purchase_orders)
+  by distribution center: dc_1=4,579, dc_2=4,594
+  by source             : csv=4,417, sql_dc_1=2,373, sql_dc_2=2,383
 
-Checks: 8 | Passed: 7 | Warnings: 1 | Failed: 0 | Errors: 0
+Checks: 9 | Passed: 7 | Warnings: 2 | Failed: 0 | Errors: 0
 1. [PASS] Table exists - found
-2. [PASS] Row count - 9,163 rows
+2. [PASS] Row count - 9,173 rows
 3. [PASS] Duplicate keys - 0 duplicate keys
 4. [PASS] Critical nulls - no nulls in key columns
 5. [PASS] Distribution centers - ['dc_1', 'dc_2']
 6. [PASS] Valid statuses - 7 statuses
-7. [PASS] Date range - created_at 2023-01-02 00:10:36 .. 2024-12-31 09:34:50
-8. [WARN] Numeric consistency - 252 rows with received_quantity > requested_quantity
+7. [PASS] Date range - created_at 2023-01-02 00:10:36 .. 2024-12-30 14:03:23
+8. [WARN] Numeric consistency - 267 rows with received_quantity > requested_quantity
+9. [WARN] Quarantined rows - missing id: 15 - review quarantined_purchase_orders
 RESULT: PASSED WITH WARNINGS
 ```
 
@@ -203,11 +210,11 @@ To read from SQL Server, install the extra with `pip install -e ".[mssql]"`, ins
 ## Testing
 
 ```bash
-pytest --cov=orders_etl     # 66 tests, ~98% coverage
+pytest --cov=orders_etl     # 73 tests, ~98% coverage
 ruff check . && ruff format --check .
 ```
 
-The tests cover type normalization edge cases, dedup tie-breaking, transactional rollback, upsert stats and the stale-row guard, incremental runs, CLI exit codes, and an end-to-end run on synthetic data. CI runs them on Python 3.11–3.13, together with a smoke run of the CLI and a [gitleaks](https://github.com/gitleaks/gitleaks) secret scan.
+The tests cover type normalization edge cases, dedup tie-breaking, quarantine of keyless rows, transactional rollback, upsert stats and the stale-row guard, incremental runs, CLI exit codes, and an end-to-end run on synthetic data. CI runs them on Python 3.11–3.13, together with a smoke run of the CLI and a [gitleaks](https://github.com/gitleaks/gitleaks) secret scan.
 
 ## Project layout
 
@@ -217,6 +224,7 @@ src/orders_etl/
   schema.py      table names, columns, DDL (single source of truth)
   extract.py     SQL + CSV extractors
   transform.py   type normalization
+  quarantine.py  set aside rows without a usable key
   dedup.py       latest-wins deduplication
   load.py        atomic full refresh + guarded upsert
   validate.py    data-quality checks and report
