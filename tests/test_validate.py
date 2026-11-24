@@ -48,7 +48,7 @@ def _status(report, name):
 def test_valid_db_passes(db):
     report = DataValidator(db).run()
     assert report.ok
-    assert len(report.checks) == 8
+    assert len(report.checks) == 9
     assert {c.status for c in report.checks} == {"PASS"}
 
 
@@ -118,5 +118,17 @@ def test_dates_out_of_range_warn(db):
 def test_render_contains_summary(db):
     text = DataValidator(db).run().render()
     assert "VALIDATION REPORT" in text
-    assert "Passed: 8" in text
+    assert "Passed: 9" in text
     assert "RESULT: PASSED" in text
+
+
+def test_quarantined_rows_warn(db):
+    from orders_etl.quarantine import split_invalid
+
+    loader = SqliteLoader(db)
+    _, rejected = split_invalid(_frame([(None, "dc_1", "Closed", 1, 1, "2024-01-01 00:00:00")]))
+    loader.save_quarantine(rejected, replace=True)
+    report = DataValidator(db).run()
+    assert _status(report, "Quarantined rows") == "WARN"
+    assert "missing id: 1" in next(c.detail for c in report.checks if c.name == "Quarantined rows")
+    assert report.ok

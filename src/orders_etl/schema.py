@@ -85,3 +85,29 @@ INDEXES_SQL: tuple[str, ...] = (
     f"CREATE INDEX IF NOT EXISTS idx_status ON {TARGET_TABLE}(status);",
     f"CREATE INDEX IF NOT EXISTS idx_order_code ON {TARGET_TABLE}(order_code);",
 )
+
+# Rows that cannot be loaded (no business key) are set aside here for review instead of
+# aborting the run. No primary key: the same bad row may be reported by several runs.
+QUARANTINE_TABLE = "quarantined_purchase_orders"
+QUARANTINE_COLUMNS: tuple[str, ...] = (*TARGET_COLUMNS, "quarantine_reason")
+
+CREATE_QUARANTINE_SQL = f"""
+CREATE TABLE IF NOT EXISTS {QUARANTINE_TABLE} (
+    id                  TEXT,
+    distribution_center TEXT,
+    order_code          TEXT,
+    product_code        INTEGER,
+    status              TEXT,
+    received_quantity   INTEGER,
+    requested_quantity  INTEGER,
+    total               REAL,
+    created_at          TIMESTAMP,
+    updated_at          TIMESTAMP,
+    supplier_code       TEXT,
+    update_month        TEXT,
+    source              TEXT,
+    loaded_at           TIMESTAMP,
+    modified_at         TIMESTAMP,
+    quarantine_reason   TEXT NOT NULL
+);
+"""

@@ -12,7 +12,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from orders_etl.schema import CREATE_TABLE_SQL, INDEXES_SQL, TARGET_COLUMNS, TARGET_TABLE
+from orders_etl.schema import (
+    CREATE_QUARANTINE_SQL,
+    CREATE_TABLE_SQL,
+    INDEXES_SQL,
+    QUARANTINE_COLUMNS,
+    QUARANTINE_TABLE,
+    TARGET_COLUMNS,
+    TARGET_TABLE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +64,8 @@ def _to_sql_value(value: object) -> object:
     return value
 
 
-def _records(df: pd.DataFrame) -> list[tuple]:
-    frame = df.reindex(columns=list(TARGET_COLUMNS)).astype(object)
+def _records(df: pd.DataFrame, columns: tuple[str, ...] = TARGET_COLUMNS) -> list[tuple]:
+    frame = df.reindex(columns=list(columns)).astype(object)
     return [tuple(_to_sql_value(v) for v in row) for row in frame.itertuples(index=False)]
 
 
@@ -77,6 +85,7 @@ class SqliteLoader:
             conn.execute(CREATE_TABLE_SQL)
             for sql in INDEXES_SQL:
                 conn.execute(sql)
+            conn.execute(CREATE_QUARANTINE_SQL)
 
     def replace_all(self, df: pd.DataFrame) -> int:
         """Full refresh. DELETE and INSERT share a transaction, so a failure keeps the old data."""
@@ -106,6 +115,20 @@ class SqliteLoader:
             f"{stats.skipped_stale:,}",
         )
         return stats
+
+    def save_quarantine(self, df: pd.DataFrame, replace: bool) -> int:
+        """Store rejected rows for review. ``replace`` mirrors a full refresh; otherwise append."""
+        rows = _records(df, QUARANTINE_COLUMNS)
+        placeholders = ", ".join("?" for _ in QUARANTINE_COLUMNS)
+        sql = (
+            f"INSERT INTO {QUARANTINE_TABLE} ({', '.join(QUARANTINE_COLUMNS)}) "
+            f"VALUES ({placeholders})"
+        )
+        with self._transaction() as conn:
+            if replace:
+                conn.execute(f"DELETE FROM {QUARANTINE_TABLE}")
+            conn.executemany(sql, rows)
+        return len(rows)
 
     def summary(self) -> LoadSummary:
         with closing(sqlite3.connect(self.db_path)) as conn:

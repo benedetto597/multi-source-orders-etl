@@ -25,6 +25,7 @@ def test_cli_all_exits_0(workdir, capsys):
     assert main(["all"]) == 0
     out = capsys.readouterr().out
     assert "RESULT: PASSED" in out
+    assert "quarantined rows" in out
     assert list((workdir / "reports").glob("validation_*.txt"))
 
 

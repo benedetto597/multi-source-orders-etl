@@ -181,6 +181,8 @@ def generate(
                         id_, seq = str(next_id), next_seq
                         next_id += 1
                         next_seq += 1
+                    if rng.random() < 0.003:  # broken record: no business key
+                        id_ = ""
                     updated = _random_ts(rng, m_start, m_end)
                     created = updated - timedelta(
                         days=rng.randint(0, 20), seconds=rng.randrange(86400)

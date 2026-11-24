@@ -35,6 +35,7 @@ def format_result(r: PipelineResult) -> str:
         f"  duplicates removed    : {r.dedup.removed:,}",
         f"  rows in target        : {r.load.total:,}",
         f"  duplicate keys        : {r.load.duplicate_keys}",
+        f"  quarantined rows      : {r.quarantined:,} (see quarantined_purchase_orders)",
         "  by distribution center: " + ", ".join(f"{k}={v:,}" for k, v in r.load.by_dc.items()),
         "  by source             : " + ", ".join(f"{k}={v:,}" for k, v in r.load.by_source.items()),
     ]

@@ -13,6 +13,7 @@ from orders_etl.config import Mode, Settings
 from orders_etl.dedup import DedupStats, remove_duplicates
 from orders_etl.extract import CsvExtractor, SqlSourceExtractor, months_since
 from orders_etl.load import LoadSummary, SqliteLoader, UpsertStats
+from orders_etl.quarantine import split_invalid
 from orders_etl.state import WatermarkStore
 from orders_etl.transform import add_load_metadata, normalize_schema
 
@@ -28,6 +29,7 @@ class PipelineResult:
     upsert: UpsertStats | None
     seconds: float
     since: datetime | None = None
+    quarantined: int = 0
 
 
 def run_pipeline(settings: Settings, now: datetime | None = None) -> PipelineResult:
@@ -57,7 +59,8 @@ def run_pipeline(settings: Settings, now: datetime | None = None) -> PipelineRes
     logger.info("Extracted %s rows in total", f"{len(raw):,}")
 
     clean = add_load_metadata(normalize_schema(raw), loaded_at=now)
-    deduped, dedup_stats = remove_duplicates(clean)
+    valid, rejected = split_invalid(clean)
+    deduped, dedup_stats = remove_duplicates(valid)
 
     loader = SqliteLoader(settings.target_db_path)
     loader.create_table()
@@ -66,6 +69,7 @@ def run_pipeline(settings: Settings, now: datetime | None = None) -> PipelineRes
         loader.replace_all(deduped)
     else:
         upsert_stats = loader.upsert(deduped)
+    loader.save_quarantine(rejected, replace=settings.mode == "full")
 
     reference = deduped["updated_at"].fillna(deduped["created_at"]).max()
     if pd.notna(reference):
@@ -81,4 +85,5 @@ def run_pipeline(settings: Settings, now: datetime | None = None) -> PipelineRes
         upsert=upsert_stats,
         seconds=round(time.perf_counter() - started, 2),
         since=since,
+        quarantined=len(rejected),
     )

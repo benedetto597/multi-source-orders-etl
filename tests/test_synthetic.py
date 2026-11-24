@@ -78,3 +78,9 @@ def test_contains_unparseable_dates_and_missing_updates(tmp_path):
             "SELECT COUNT(*) FROM purchase_orders_dc_2 WHERE updated_at IS NULL"
         ).fetchone()
     assert nulls > 0
+
+
+def test_some_csv_rows_have_no_id(tmp_path):
+    generate(tmp_path / "src.db", tmp_path / "csv", orders_per_dc=1000)
+    csv = pd.concat(pd.read_csv(f, dtype=str) for f in (tmp_path / "csv").rglob("*.csv"))
+    assert 0 < csv["id"].isna().sum() < len(csv) * 0.01

@@ -10,7 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from orders_etl.schema import DISTRIBUTION_CENTERS, TARGET_TABLE, VALID_STATUSES
+from orders_etl.schema import (
+    DISTRIBUTION_CENTERS,
+    QUARANTINE_TABLE,
+    TARGET_TABLE,
+    VALID_STATUSES,
+)
 
 Status = Literal["PASS", "WARN", "FAIL", "ERROR"]
 
@@ -87,6 +92,7 @@ class DataValidator:
                 ("Valid statuses", self._statuses),
                 ("Date range", self._date_range),
                 ("Numeric consistency", self._numeric_consistency),
+                ("Quarantined rows", self._quarantine),
             ):
                 report.checks.append(self._safe(name, check))
         return report
@@ -177,3 +183,20 @@ class DataValidator:
         if over:
             return "WARN", f"{over:,} rows with received_quantity > requested_quantity"
         return "PASS", "no negative or over-delivered rows"
+
+    def _quarantine(self) -> tuple[Status, str]:
+        exists = self._scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (QUARANTINE_TABLE,),
+        )
+        if not exists:
+            return "PASS", "no quarantine table"
+        by_reason = dict(
+            self._conn.execute(
+                f"SELECT quarantine_reason, COUNT(*) FROM {QUARANTINE_TABLE} GROUP BY 1 ORDER BY 1"
+            )
+        )
+        if not by_reason:
+            return "PASS", "0 rows set aside"
+        detail = ", ".join(f"{reason}: {n:,}" for reason, n in by_reason.items())
+        return "WARN", f"{detail} - review {QUARANTINE_TABLE}"

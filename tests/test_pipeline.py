@@ -43,7 +43,7 @@ def _unique_source_keys(settings) -> int:
         for dc in ("dc_1", "dc_2"):
             keys |= {(str(r[0]), dc) for r in conn.execute(f"SELECT id FROM purchase_orders_{dc}")}
     for f in Path(settings.csv_dir).glob("*/orders_*.csv"):
-        keys |= {(i, f.parent.name) for i in pd.read_csv(f, dtype=str)["id"]}
+        keys |= {(i, f.parent.name) for i in pd.read_csv(f, dtype=str)["id"].dropna()}
     return len(keys)
 
 
@@ -58,11 +58,31 @@ def test_full_run_end_to_end(settings):
     assert WatermarkStore(settings.state_path).get() is not None
 
 
+def _csv_rows_without_id(settings) -> int:
+    return sum(
+        int(pd.read_csv(f, dtype=str)["id"].isna().sum())
+        for f in Path(settings.csv_dir).glob("*/orders_*.csv")
+    )
+
+
+def test_full_run_quarantines_rows_without_id(settings):
+    expected = _csv_rows_without_id(settings)
+    assert expected > 0  # the synthetic data contains some
+    result = run_pipeline(settings, now=NOW)
+    assert result.quarantined == expected
+    reasons = _target(
+        settings, "SELECT DISTINCT quarantine_reason FROM quarantined_purchase_orders"
+    )
+    assert reasons == [("missing id",)]
+
+
 def test_full_run_twice_same_count(settings):
     first = run_pipeline(settings, now=NOW)
     second = run_pipeline(settings, now=NOW)
     assert second.load.total == first.load.total
     assert second.load.duplicate_keys == 0
+    (n,) = _target(settings, "SELECT COUNT(*) FROM quarantined_purchase_orders")[0]
+    assert n == first.quarantined  # full refresh replaces the quarantine too
 
 
 def test_runs_without_csv_dir(settings, tmp_path):
