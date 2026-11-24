@@ -20,8 +20,12 @@ _KEY = ("id", "distribution_center")
 _PLACEHOLDERS = ", ".join("?" for _ in TARGET_COLUMNS)
 _INSERT_SQL = f"INSERT INTO {TARGET_TABLE} ({', '.join(TARGET_COLUMNS)}) VALUES ({_PLACEHOLDERS})"
 _UPDATABLE = [c for c in TARGET_COLUMNS if c not in (*_KEY, "loaded_at")]
-_UPSERT_SQL = f"{_INSERT_SQL} ON CONFLICT(id, distribution_center) DO UPDATE SET " + ", ".join(
-    f"{c} = excluded.{c}" for c in _UPDATABLE
+# Latest-wins also against the target: an older re-delivery never overwrites a newer row.
+_UPSERT_SQL = (
+    f"{_INSERT_SQL} ON CONFLICT(id, distribution_center) DO UPDATE SET "
+    + ", ".join(f"{c} = excluded.{c}" for c in _UPDATABLE)
+    + " WHERE COALESCE(excluded.updated_at, excluded.created_at, '')"
+    f" >= COALESCE({TARGET_TABLE}.updated_at, {TARGET_TABLE}.created_at, '')"
 )
 
 
@@ -29,6 +33,7 @@ _UPSERT_SQL = f"{_INSERT_SQL} ON CONFLICT(id, distribution_center) DO UPDATE SET
 class UpsertStats:
     inserted: int
     updated: int
+    skipped_stale: int = 0
 
 
 @dataclass(frozen=True)
@@ -87,10 +92,19 @@ class SqliteLoader:
         rows = _records(df)
         with self._transaction() as conn:
             existing = set(conn.execute(f"SELECT id, distribution_center FROM {TARGET_TABLE}"))
-            updated = sum((r[0], r[1]) in existing for r in rows)
+            matched = sum((r[0], r[1]) in existing for r in rows)
+            before = conn.total_changes
             conn.executemany(_UPSERT_SQL, rows)
-        stats = UpsertStats(inserted=len(rows) - updated, updated=updated)
-        logger.info("Upsert: %s inserted, %s updated", f"{stats.inserted:,}", f"{stats.updated:,}")
+            changed = conn.total_changes - before
+        inserted = len(rows) - matched
+        updated = changed - inserted
+        stats = UpsertStats(inserted=inserted, updated=updated, skipped_stale=matched - updated)
+        logger.info(
+            "Upsert: %s inserted, %s updated, %s stale rows skipped",
+            f"{stats.inserted:,}",
+            f"{stats.updated:,}",
+            f"{stats.skipped_stale:,}",
+        )
         return stats
 
     def summary(self) -> LoadSummary:

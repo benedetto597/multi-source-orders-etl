@@ -81,6 +81,18 @@ def test_upsert_counts_inserts_and_updates(loader):
     assert row == [("Closed", "csv", "2026-01-01 08:00:00", "2026-01-02 08:00:00")]
 
 
+def test_upsert_does_not_overwrite_newer_row(loader):
+    newer = _orders([("1", "dc_1", "Closed", "csv")])
+    newer["updated_at"] = pd.Timestamp("2024-12-01 00:00:00")
+    loader.replace_all(newer)
+    stale = _orders([("1", "dc_1", "In progress", "sql_dc_1")], loaded_at=T1)
+    stale["updated_at"] = pd.Timestamp("2024-02-01 00:00:00")
+    stats = loader.upsert(stale)
+    assert stats == UpsertStats(inserted=0, updated=0, skipped_stale=1)
+    status = _query(loader.db_path, "SELECT status FROM consolidated_purchase_orders")
+    assert status == [("Closed",)]
+
+
 def test_summary_counts(loader):
     loader.replace_all(
         _orders(
